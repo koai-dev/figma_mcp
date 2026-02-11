@@ -1,12 +1,13 @@
 // Figma MCP Bridge - Plugin main thread
 // This plugin runs a hidden UI to connect to a local MCP server via WebSocket.
 
-const SERVER_URL = "ws://localhost:8765";
+const SERVER_URL = "http://localhost:8765";
 
 figma.showUI(__html__, { visible: false, width: 1, height: 1 });
 figma.ui.postMessage({ type: "config", serverUrl: SERVER_URL });
 
 const MIXED = figma.mixed;
+let defaultConnectorStyle = null;
 
 figma.ui.onmessage = async (msg) => {
   if (!msg || msg.type !== "request") return;
@@ -120,6 +121,8 @@ async function handleRequest(method, params) {
       return setFocus(params);
     case "set_selections":
       return setSelections(params);
+    case "snapshot_nodes":
+      return snapshotNodes(params);
     case "get_node":
       return getNode(params);
     case "get_annotations":
@@ -150,6 +153,50 @@ async function handleRequest(method, params) {
       return setTextContent(params);
     case "set_multiple_text_contents":
       return setMultipleTextContents(params);
+    case "set_layout_mode":
+      return setLayoutMode(params);
+    case "set_padding":
+      return setPadding(params);
+    case "set_axis_align":
+      return setAxisAlign(params);
+    case "set_layout_sizing":
+      return setLayoutSizing(params);
+    case "set_item_spacing":
+      return setItemSpacing(params);
+    case "move_node":
+      return moveNode(params);
+    case "resize_node":
+      return resizeNode(params);
+    case "delete_node":
+      return deleteNode(params);
+    case "delete_multiple_nodes":
+      return deleteMultipleNodes(params);
+    case "clone_node":
+      return cloneNode(params);
+    case "get_styles":
+      return getStyles(params);
+    case "get_local_components":
+      return getLocalComponents(params);
+    case "create_component_instance":
+      return createComponentInstance(params);
+    case "get_instance_overrides":
+      return getInstanceOverrides(params);
+    case "set_instance_overrides":
+      return setInstanceOverrides(params);
+    case "set_fill_color":
+      return setFillColor(params);
+    case "set_stroke_color":
+      return setStrokeColor(params);
+    case "set_corner_radius":
+      return setCornerRadius(params);
+    case "get_reactions":
+      return getReactions(params);
+    case "set_default_connector":
+      return setDefaultConnector(params);
+    case "create_connections":
+      return createConnections(params);
+    case "export_node_as_image":
+      return exportNodeAsImage(params);
     case "set_text":
       return setText(params);
     case "update_style":
@@ -158,6 +205,8 @@ async function handleRequest(method, params) {
       return getPageTree(params);
     case "search_nodes":
       return searchNodes(params);
+    case "query_nodes":
+      return queryNodes(params);
     default:
       throw new Error(`Unknown method: ${method}`);
   }
@@ -378,6 +427,18 @@ function getNodesInfo(params) {
   };
 }
 
+function snapshotNodes(params) {
+  const depth = typeof params.depth === "number" ? params.depth : 0;
+  if (!Array.isArray(params.nodeIds)) {
+    throw new Error("nodeIds must be an array");
+  }
+  const nodes = params.nodeIds.map((nodeId) => getNodeById(nodeId));
+  return {
+    timestamp: Date.now(),
+    nodes: nodes.map((node) => nodeToJSON(node, depth))
+  };
+}
+
 function setFocus(params) {
   const node = getSceneNode(params.nodeId);
   figma.currentPage.selection = [node];
@@ -445,6 +506,98 @@ function searchNodes(params) {
   const results = root.findAll((node) => {
     if (allowedTypes.size > 0 && !allowedTypes.has(node.type)) return false;
     if (nameContains && !node.name.toLowerCase().includes(nameContains)) return false;
+    return true;
+  });
+
+  const sliced = results.slice(0, limit);
+  return {
+    rootId: root.id,
+    count: results.length,
+    returned: sliced.length,
+    results: sliced.map((node) => nodeToJSON(node, 0))
+  };
+}
+
+function queryNodes(params) {
+  const limit = typeof params.limit === "number" && params.limit > 0 ? params.limit : 100;
+  const nameContains =
+    typeof params.nameContains === "string" && params.nameContains.trim().length > 0
+      ? params.nameContains.trim().toLowerCase()
+      : null;
+
+  let nameRegex = null;
+  if (typeof params.nameRegex === "string" && params.nameRegex.length > 0) {
+    try {
+      const flags = typeof params.nameRegexFlags === "string" ? params.nameRegexFlags : "i";
+      nameRegex = new RegExp(params.nameRegex, flags);
+    } catch (err) {
+      throw new Error("Invalid nameRegex");
+    }
+  }
+
+  const allowedTypes = new Set();
+  if (typeof params.type === "string") allowedTypes.add(params.type);
+  if (Array.isArray(params.types)) {
+    params.types.forEach((value) => {
+      if (typeof value === "string") allowedTypes.add(value);
+    });
+  }
+
+  const visible = typeof params.visible === "boolean" ? params.visible : null;
+  const locked = typeof params.locked === "boolean" ? params.locked : null;
+  const opacityMin = typeof params.opacityMin === "number" ? params.opacityMin : null;
+  const opacityMax = typeof params.opacityMax === "number" ? params.opacityMax : null;
+  const hasFills = typeof params.hasFills === "boolean" ? params.hasFills : null;
+  const hasStrokes = typeof params.hasStrokes === "boolean" ? params.hasStrokes : null;
+  const textContains =
+    typeof params.textContains === "string" && params.textContains.trim().length > 0
+      ? params.textContains.trim().toLowerCase()
+      : null;
+
+  let root = figma.currentPage;
+  if (typeof params.parentId === "string") {
+    root = getNodeById(params.parentId);
+  } else if (typeof params.pageId === "string") {
+    root = getNodeById(params.pageId);
+  }
+
+  if (!("findAll" in root)) {
+    throw new Error("Root node does not support findAll");
+  }
+
+  const results = root.findAll((node) => {
+    if (allowedTypes.size > 0 && !allowedTypes.has(node.type)) return false;
+    if (nameContains && !node.name.toLowerCase().includes(nameContains)) return false;
+    if (nameRegex && !nameRegex.test(node.name)) return false;
+
+    if (visible !== null) {
+      if (!("visible" in node) || node.visible !== visible) return false;
+    }
+    if (locked !== null) {
+      if (!("locked" in node) || node.locked !== locked) return false;
+    }
+    if (opacityMin !== null || opacityMax !== null) {
+      if (!("opacity" in node)) return false;
+      if (opacityMin !== null && node.opacity < opacityMin) return false;
+      if (opacityMax !== null && node.opacity > opacityMax) return false;
+    }
+    if (hasFills !== null) {
+      if (!("fills" in node)) return false;
+      const fills = node.fills === MIXED ? [] : node.fills;
+      const has = Array.isArray(fills) && fills.length > 0;
+      if (hasFills !== has) return false;
+    }
+    if (hasStrokes !== null) {
+      if (!("strokes" in node)) return false;
+      const strokes = node.strokes === MIXED ? [] : node.strokes;
+      const has = Array.isArray(strokes) && strokes.length > 0;
+      if (hasStrokes !== has) return false;
+    }
+    if (textContains) {
+      if (node.type !== "TEXT") return false;
+      if (!node.characters.toLowerCase().includes(textContains)) return false;
+    }
+
     return true;
   });
 
@@ -714,6 +867,572 @@ async function setMultipleTextContents(params) {
   }
 
   return { updated: results.length, results };
+}
+
+function getAutoLayoutFrame(params) {
+  const node = getSceneNode(params.nodeId);
+  if (!("layoutMode" in node)) {
+    throw new Error("Node does not support auto layout");
+  }
+  return node;
+}
+
+function setLayoutMode(params) {
+  const node = getAutoLayoutFrame(params);
+  const mode = params.layoutMode;
+  if (mode !== "NONE" && mode !== "HORIZONTAL" && mode !== "VERTICAL") {
+    throw new Error("layoutMode must be NONE, HORIZONTAL, or VERTICAL");
+  }
+  node.layoutMode = mode;
+
+  if (typeof params.primaryAxisAlignItems === "string") {
+    node.primaryAxisAlignItems = params.primaryAxisAlignItems;
+  }
+  if (typeof params.counterAxisAlignItems === "string") {
+    node.counterAxisAlignItems = params.counterAxisAlignItems;
+  }
+  if (typeof params.primaryAxisSizingMode === "string") {
+    node.primaryAxisSizingMode = params.primaryAxisSizingMode;
+  }
+  if (typeof params.counterAxisSizingMode === "string") {
+    node.counterAxisSizingMode = params.counterAxisSizingMode;
+  }
+  if (typeof params.itemSpacing === "number") {
+    node.itemSpacing = params.itemSpacing;
+  }
+  if (typeof params.paddingTop === "number") node.paddingTop = params.paddingTop;
+  if (typeof params.paddingRight === "number") node.paddingRight = params.paddingRight;
+  if (typeof params.paddingBottom === "number") node.paddingBottom = params.paddingBottom;
+  if (typeof params.paddingLeft === "number") node.paddingLeft = params.paddingLeft;
+
+  if (typeof params.layoutWrap === "string" && "layoutWrap" in node) {
+    node.layoutWrap = params.layoutWrap;
+  }
+
+  return nodeToJSON(node, 0);
+}
+
+function setPadding(params) {
+  const node = getAutoLayoutFrame(params);
+  if (typeof params.top === "number") node.paddingTop = params.top;
+  if (typeof params.right === "number") node.paddingRight = params.right;
+  if (typeof params.bottom === "number") node.paddingBottom = params.bottom;
+  if (typeof params.left === "number") node.paddingLeft = params.left;
+  return nodeToJSON(node, 0);
+}
+
+function setAxisAlign(params) {
+  const node = getAutoLayoutFrame(params);
+  if (typeof params.primaryAxisAlignItems === "string") {
+    node.primaryAxisAlignItems = params.primaryAxisAlignItems;
+  }
+  if (typeof params.counterAxisAlignItems === "string") {
+    node.counterAxisAlignItems = params.counterAxisAlignItems;
+  }
+  return nodeToJSON(node, 0);
+}
+
+function setLayoutSizing(params) {
+  const node = getSceneNode(params.nodeId);
+  const canSize =
+    "layoutSizingHorizontal" in node ||
+    "layoutSizingVertical" in node ||
+    "primaryAxisSizingMode" in node ||
+    "counterAxisSizingMode" in node;
+  if (!canSize) {
+    throw new Error("Node does not support layout sizing");
+  }
+  const horizontal = params.horizontal || params.layoutSizingHorizontal;
+  const vertical = params.vertical || params.layoutSizingVertical;
+
+  const validSizing = new Set(["HUG", "FILL", "FIXED"]);
+  if (horizontal && !validSizing.has(horizontal)) {
+    throw new Error("horizontal must be HUG, FILL, or FIXED");
+  }
+  if (vertical && !validSizing.has(vertical)) {
+    throw new Error("vertical must be HUG, FILL, or FIXED");
+  }
+
+  if (horizontal && "layoutSizingHorizontal" in node) {
+    node.layoutSizingHorizontal = horizontal;
+  }
+  if (vertical && "layoutSizingVertical" in node) {
+    node.layoutSizingVertical = vertical;
+  }
+
+  if (typeof params.primaryAxisSizingMode === "string") {
+    node.primaryAxisSizingMode = params.primaryAxisSizingMode;
+  }
+  if (typeof params.counterAxisSizingMode === "string") {
+    node.counterAxisSizingMode = params.counterAxisSizingMode;
+  }
+
+  if ((horizontal || vertical) && !("layoutSizingHorizontal" in node)) {
+    if (horizontal === "FILL" || vertical === "FILL") {
+      throw new Error("FILL sizing is only supported on auto-layout children");
+    }
+    // Map HUG -> AUTO, FIXED -> FIXED for auto layout frames without layoutSizing* props
+    if (horizontal === "HUG") {
+      node.primaryAxisSizingMode = "AUTO";
+    } else if (horizontal === "FIXED") {
+      node.primaryAxisSizingMode = "FIXED";
+    }
+    if (vertical === "HUG") {
+      node.counterAxisSizingMode = "AUTO";
+    } else if (vertical === "FIXED") {
+      node.counterAxisSizingMode = "FIXED";
+    }
+  }
+  return nodeToJSON(node, 0);
+}
+
+function setItemSpacing(params) {
+  const node = getAutoLayoutFrame(params);
+  if (typeof params.itemSpacing !== "number") {
+    throw new Error("itemSpacing must be a number");
+  }
+  node.itemSpacing = params.itemSpacing;
+  return nodeToJSON(node, 0);
+}
+
+function moveNode(params) {
+  const node = getSceneNode(params.nodeId);
+  if (typeof params.x === "number") node.x = params.x;
+  if (typeof params.y === "number") node.y = params.y;
+  return nodeToJSON(node, 0);
+}
+
+function resizeNode(params) {
+  const node = getSceneNode(params.nodeId);
+  if (typeof node.resize !== "function") {
+    throw new Error("Node cannot be resized");
+  }
+  if (typeof params.width !== "number" || typeof params.height !== "number") {
+    throw new Error("width and height are required");
+  }
+  node.resize(params.width, params.height);
+  return nodeToJSON(node, 0);
+}
+
+function deleteNode(params) {
+  const node = getSceneNode(params.nodeId);
+  node.remove();
+  return { nodeId: params.nodeId, deleted: true };
+}
+
+function deleteMultipleNodes(params) {
+  if (!Array.isArray(params.nodeIds)) {
+    throw new Error("nodeIds must be an array");
+  }
+  const deleted = [];
+  for (const nodeId of params.nodeIds) {
+    const node = getSceneNode(nodeId);
+    node.remove();
+    deleted.push(nodeId);
+  }
+  return { deletedCount: deleted.length, nodeIds: deleted };
+}
+
+function cloneNode(params) {
+  const node = getSceneNode(params.nodeId);
+  const clone = node.clone();
+  if (typeof params.x === "number") {
+    clone.x = params.x;
+  } else if (typeof params.dx === "number") {
+    clone.x = clone.x + params.dx;
+  }
+  if (typeof params.y === "number") {
+    clone.y = params.y;
+  } else if (typeof params.dy === "number") {
+    clone.y = clone.y + params.dy;
+  }
+  if (typeof params.name === "string") clone.name = params.name;
+  if (params.appendToParent === true && node.parent && "appendChild" in node.parent) {
+    node.parent.appendChild(clone);
+  }
+  return nodeToJSON(clone, 0);
+}
+
+function getStyles(params) {
+  return getStylesAsync(params);
+}
+
+async function getStylesAsync(params) {
+  const includeRemote = params && params.includeRemote === true;
+  const styles = figma.getLocalPaintStyles()
+    .map((style) => ({
+      id: style.id,
+      name: style.name,
+      type: style.type,
+      paints: style.paints
+    }))
+    .concat(
+      figma.getLocalTextStyles().map((style) => ({
+        id: style.id,
+        name: style.name,
+        type: style.type,
+        fontName: style.fontName,
+        fontSize: style.fontSize,
+        letterSpacing: style.letterSpacing,
+        lineHeight: style.lineHeight
+      }))
+    )
+    .concat(
+      figma.getLocalEffectStyles().map((style) => ({
+        id: style.id,
+        name: style.name,
+        type: style.type,
+        effects: style.effects
+      }))
+    )
+    .concat(
+      figma.getLocalGridStyles().map((style) => ({
+        id: style.id,
+        name: style.name,
+        type: style.type,
+        layoutGrids: style.layoutGrids
+      }))
+    );
+
+  if (includeRemote && figma.getTeamLibrary && figma.getTeamLibraryStylesAsync) {
+    return await getTeamLibraryStyles(styles);
+  }
+
+  return { local: styles };
+}
+
+async function getTeamLibraryStyles(localStyles) {
+  const libraryStyles = await figma.getTeamLibraryStylesAsync();
+  return { local: localStyles, remote: libraryStyles };
+}
+
+function getLocalComponents(params) {
+  return getLocalComponentsAsync(params);
+}
+
+async function getLocalComponentsAsync(params) {
+  const includeAllPages = params && params.includeAllPages === true;
+  if (includeAllPages) {
+    await figma.loadAllPagesAsync();
+  }
+  const root = includeAllPages ? figma.root : figma.currentPage;
+  const components = root.findAll((node) => node.type === "COMPONENT" || node.type === "COMPONENT_SET");
+  const result = components.map((node) => ({
+    id: node.id,
+    name: node.name,
+    type: node.type
+  }));
+  return { count: result.length, components: result };
+}
+
+function createComponentInstance(params) {
+  const component = getSceneNode(params.componentId);
+  if (component.type !== "COMPONENT" && component.type !== "COMPONENT_SET") {
+    throw new Error("componentId must reference a COMPONENT or COMPONENT_SET");
+  }
+
+  let instance = null;
+  if (component.type === "COMPONENT_SET") {
+    const variantId = params.variantId;
+    if (typeof variantId === "string") {
+      const variant = component.children.find((child) => child.id === variantId);
+      if (variant && variant.type === "COMPONENT") {
+        instance = variant.createInstance();
+      }
+    }
+    if (!instance) {
+      instance = component.defaultVariant.createInstance();
+    }
+  } else {
+    instance = component.createInstance();
+  }
+
+  if (typeof params.x === "number") instance.x = params.x;
+  if (typeof params.y === "number") instance.y = params.y;
+  if (typeof params.name === "string") instance.name = params.name;
+
+  resolveParentNode(params.parentId).appendChild(instance);
+  return nodeToJSON(instance, 1);
+}
+
+function getInstanceOverrides(params) {
+  const node = getSceneNode(params.nodeId);
+  if (node.type !== "INSTANCE") throw new Error("Node is not an INSTANCE");
+  const overrides = node.getProperties();
+  return { nodeId: node.id, overrides };
+}
+
+function setInstanceOverrides(params) {
+  const node = getSceneNode(params.nodeId);
+  if (node.type !== "INSTANCE") throw new Error("Node is not an INSTANCE");
+  if (!params.overrides || typeof params.overrides !== "object") {
+    throw new Error("overrides must be an object");
+  }
+  node.setProperties(params.overrides);
+  return { nodeId: node.id, ok: true };
+}
+
+function setFillColor(params) {
+  const node = getSceneNode(params.nodeId);
+  if (!("fills" in node)) throw new Error("Node does not support fills");
+  setSolidFill(node, params.color || params.fillColor || params);
+  return nodeToJSON(node, 0);
+}
+
+function setStrokeColor(params) {
+  const node = getSceneNode(params.nodeId);
+  if (!("strokes" in node)) throw new Error("Node does not support strokes");
+  const color = params.color || params.strokeColor || params;
+  setSolidStroke(node, color, params.strokeWeight);
+  return nodeToJSON(node, 0);
+}
+
+function setCornerRadius(params) {
+  const node = getSceneNode(params.nodeId);
+  const corners = params.corners;
+  if (corners && typeof corners === "object") {
+    if ("topLeft" in node && typeof corners.topLeft === "number") node.topLeftRadius = corners.topLeft;
+    if ("topRight" in node && typeof corners.topRight === "number") node.topRightRadius = corners.topRight;
+    if ("bottomLeft" in node && typeof corners.bottomLeft === "number") node.bottomLeftRadius = corners.bottomLeft;
+    if ("bottomRight" in node && typeof corners.bottomRight === "number") node.bottomRightRadius = corners.bottomRight;
+    return nodeToJSON(node, 0);
+  }
+  if ("cornerRadius" in node && typeof params.cornerRadius === "number") {
+    node.cornerRadius = params.cornerRadius;
+    return nodeToJSON(node, 0);
+  }
+  throw new Error("Node does not support corner radius or missing radius values");
+}
+
+function getReactions(params) {
+  return getReactionsAsync(params);
+}
+
+async function getReactionsAsync(params) {
+  const includeAllPages = params && params.includeAllPages === true;
+  const limit = typeof params.limit === "number" && params.limit > 0 ? params.limit : null;
+  const highlightOnly = params && params.highlightOnly === true;
+
+  if (params && typeof params.nodeId === "string") {
+    const node = getSceneNode(params.nodeId);
+    const reactions = Array.isArray(node.reactions)
+      ? node.reactions.filter((reaction) => !highlightOnly || isHighlightReaction(reaction))
+      : [];
+    return {
+      nodeId: node.id,
+      name: node.name,
+      type: node.type,
+      reactions
+    };
+  }
+
+  let pages = [];
+  if (params && typeof params.pageId === "string") {
+    const page = getNodeById(params.pageId);
+    if (page.type !== "PAGE") throw new Error("pageId must be a PAGE node");
+    pages = [page];
+  } else if (includeAllPages) {
+    await figma.loadAllPagesAsync();
+    pages = figma.root.children;
+  } else {
+    pages = [figma.currentPage];
+  }
+
+  const nodes = [];
+  for (const page of pages) {
+    if (!("findAll" in page)) continue;
+    const found = page.findAll((node) => {
+      if (!Array.isArray(node.reactions) || node.reactions.length === 0) return false;
+      if (!highlightOnly) return true;
+      return node.reactions.some((reaction) => isHighlightReaction(reaction));
+    });
+    for (const node of found) {
+      const reactions = highlightOnly
+        ? node.reactions.filter((reaction) => isHighlightReaction(reaction))
+        : node.reactions;
+      nodes.push({
+        nodeId: node.id,
+        pageId: page.id,
+        name: node.name,
+        type: node.type,
+        reactions
+      });
+      if (limit && nodes.length >= limit) break;
+    }
+    if (limit && nodes.length >= limit) break;
+  }
+
+  return {
+    pageCount: pages.length,
+    nodeCount: nodes.length,
+    highlightOnly,
+    nodes
+  };
+}
+
+function isHighlightReaction(reaction) {
+  if (!reaction || !reaction.action) return false;
+  const action = reaction.action;
+  if (action.type !== "NODE") return false;
+  if (action.navigation === "NONE") return true;
+  if (action.transition && action.transition.type === "SMART_ANIMATE") return true;
+  return false;
+}
+
+function ensureFigJamConnectors() {
+  if (figma.editorType && figma.editorType !== "figjam") {
+    throw new Error("Connectors are only available in FigJam");
+  }
+  if (typeof figma.createConnector !== "function") {
+    throw new Error("createConnector is not available in this editor");
+  }
+}
+
+function extractConnectorStyle(connector) {
+  const style = {};
+  if ("connectorLineType" in connector) style.connectorLineType = connector.connectorLineType;
+  if ("connectorStartStrokeCap" in connector) style.connectorStartStrokeCap = connector.connectorStartStrokeCap;
+  if ("connectorEndStrokeCap" in connector) style.connectorEndStrokeCap = connector.connectorEndStrokeCap;
+  if ("strokes" in connector) style.strokes = connector.strokes;
+  if ("strokeWeight" in connector) style.strokeWeight = connector.strokeWeight;
+  if ("dashPattern" in connector) style.dashPattern = connector.dashPattern;
+  if ("opacity" in connector) style.opacity = connector.opacity;
+  return style;
+}
+
+function applyConnectorStyle(connector, style) {
+  if (!style) return;
+  if ("connectorLineType" in style && "connectorLineType" in connector) {
+    connector.connectorLineType = style.connectorLineType;
+  }
+  if ("connectorStartStrokeCap" in style && "connectorStartStrokeCap" in connector) {
+    connector.connectorStartStrokeCap = style.connectorStartStrokeCap;
+  }
+  if ("connectorEndStrokeCap" in style && "connectorEndStrokeCap" in connector) {
+    connector.connectorEndStrokeCap = style.connectorEndStrokeCap;
+  }
+  if ("strokes" in style && "strokes" in connector) {
+    connector.strokes = style.strokes;
+  }
+  if ("strokeWeight" in style && "strokeWeight" in connector) {
+    connector.strokeWeight = style.strokeWeight;
+  }
+  if ("dashPattern" in style && "dashPattern" in connector) {
+    connector.dashPattern = style.dashPattern;
+  }
+  if ("opacity" in style && "opacity" in connector) {
+    connector.opacity = style.opacity;
+  }
+}
+
+function getConnectorNodeFromSelection(params) {
+  if (params && typeof params.connectorId === "string") {
+    const node = getSceneNode(params.connectorId);
+    if (node.type !== "CONNECTOR") throw new Error("connectorId must be a CONNECTOR node");
+    return node;
+  }
+
+  const selection = figma.currentPage.selection || [];
+  const connector = selection.find((node) => node.type === "CONNECTOR");
+  if (!connector) {
+    throw new Error("No connector selected. Select a connector or pass connectorId.");
+  }
+  return connector;
+}
+
+function setDefaultConnector(params) {
+  ensureFigJamConnectors();
+  const connector = getConnectorNodeFromSelection(params || {});
+  defaultConnectorStyle = extractConnectorStyle(connector);
+  return { ok: true, style: defaultConnectorStyle };
+}
+
+function createConnections(params) {
+  ensureFigJamConnectors();
+  if (!Array.isArray(params.connections)) {
+    throw new Error("connections must be an array");
+  }
+
+  const created = [];
+  for (const item of params.connections) {
+    const fromNode = getSceneNode(item.fromNodeId);
+    const toNode = getSceneNode(item.toNodeId);
+
+    const connector = figma.createConnector();
+    const start = { endpointNodeId: fromNode.id };
+    if (typeof item.fromMagnet === "string") start.magnet = item.fromMagnet;
+    const end = { endpointNodeId: toNode.id };
+    if (typeof item.toMagnet === "string") end.magnet = item.toMagnet;
+    connector.connectorStart = start;
+    connector.connectorEnd = end;
+
+    applyConnectorStyle(connector, defaultConnectorStyle);
+    applyConnectorStyle(connector, item.style);
+
+    if (typeof item.connectorLineType === "string") connector.connectorLineType = item.connectorLineType;
+    if (typeof item.connectorStartStrokeCap === "string") connector.connectorStartStrokeCap = item.connectorStartStrokeCap;
+    if (typeof item.connectorEndStrokeCap === "string") connector.connectorEndStrokeCap = item.connectorEndStrokeCap;
+    if (item.strokes) connector.strokes = item.strokes;
+    if (typeof item.strokeWeight === "number") connector.strokeWeight = item.strokeWeight;
+    if (item.dashPattern) connector.dashPattern = item.dashPattern;
+    if (typeof item.opacity === "number") connector.opacity = item.opacity;
+
+    if (typeof item.name === "string") connector.name = item.name;
+
+    if (typeof item.parentId === "string") {
+      const parent = getNodeById(item.parentId);
+      if (parent && "appendChild" in parent) parent.appendChild(connector);
+    }
+
+    created.push({ connectorId: connector.id, fromNodeId: fromNode.id, toNodeId: toNode.id });
+  }
+
+  return { createdCount: created.length, connectors: created };
+}
+
+async function exportNodeAsImage(params) {
+  const node = getSceneNode(params.nodeId);
+  const formatInput = typeof params.format === "string" ? params.format.toUpperCase() : "PNG";
+  const format = formatInput === "JPEG" ? "JPG" : formatInput;
+  if (!["PNG", "JPG", "SVG", "PDF"].includes(format)) {
+    throw new Error("format must be PNG, JPG, SVG, or PDF");
+  }
+
+  const settings = { format };
+
+  if ((format === "PNG" || format === "JPG") && typeof params.scale === "number" && params.scale > 0) {
+    settings.constraint = { type: "SCALE", value: params.scale };
+  }
+  if (format === "JPG" && typeof params.quality === "number") {
+    const q = Math.max(0, Math.min(1, params.quality));
+    settings.quality = q;
+  }
+  if (format === "SVG" && typeof params.svgOutlineText === "boolean") {
+    settings.svgOutlineText = params.svgOutlineText;
+  }
+
+  const bytes = await node.exportAsync(settings);
+  const base64 = figma.base64Encode(bytes);
+
+  let mime = "application/octet-stream";
+  if (format === "PNG") mime = "image/png";
+  if (format === "JPG") mime = "image/jpeg";
+  if (format === "SVG") mime = "image/svg+xml";
+  if (format === "PDF") mime = "application/pdf";
+
+  const result = {
+    nodeId: node.id,
+    format,
+    bytes: bytes.length,
+    mime,
+    dataUrl: `data:${mime};base64,${base64}`
+  };
+
+  if (format === "SVG") {
+    result.svg = typeof TextDecoder !== "undefined" ? new TextDecoder("utf-8").decode(bytes) : null;
+  }
+
+  return result;
 }
 
 async function setText(params) {

@@ -10,77 +10,43 @@
   <body>
     <script>
       (function () {
-        let serverUrl = "ws://localhost:8765";
-        let ws = null;
-        let queue = [];
-        let reconnectDelay = 1000;
-        let reconnectTimer = null;
+        let serverUrl = "http://localhost:8765";
+        let pollTimer = null;
+        let pollInterval = 600;
+        let isPolling = false;
 
         function log(message) {
           // Visible only in Figma plugin console
           console.log("[figma-mcp]", message);
         }
 
-        function sendToServer(message) {
-          if (ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify(message));
-          } else {
-            queue.push(message);
-          }
+        async function post(path, body) {
+          const res = await fetch(serverUrl + path, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(body)
+          });
+          return res;
         }
 
-        function flushQueue() {
-          if (!ws || ws.readyState !== WebSocket.OPEN) return;
-          const pending = queue;
-          queue = [];
-          pending.forEach((msg) => ws.send(JSON.stringify(msg)));
-        }
-
-        function scheduleReconnect() {
-          if (reconnectTimer) return;
-          reconnectTimer = setTimeout(() => {
-            reconnectTimer = null;
-            connect();
-          }, reconnectDelay);
-        }
-
-        function connect() {
+        async function poll() {
+          if (isPolling) return;
+          isPolling = true;
           try {
-            ws = new WebSocket(serverUrl);
-          } catch (err) {
-            log("WebSocket error: " + err);
-            scheduleReconnect();
-            return;
-          }
-
-          ws.onopen = () => {
-            log("Connected to " + serverUrl);
-            sendToServer({ type: "hello", plugin: "figma-mcp-bridge", version: "0.1.0" });
-            flushQueue();
-          };
-
-          ws.onclose = () => {
-            log("Disconnected. Reconnecting...");
-            scheduleReconnect();
-          };
-
-          ws.onerror = (event) => {
-            log("WebSocket error");
-          };
-
-          ws.onmessage = (event) => {
-            try {
-              const msg = JSON.parse(event.data);
-              if (!msg || !msg.type) return;
-              if (msg.type === "request") {
+            const res = await fetch(serverUrl + "/pull");
+            if (res.status === 204) {
+              // no pending requests
+            } else if (res.ok) {
+              const msg = await res.json();
+              if (msg && msg.type === "request") {
                 parent.postMessage({ pluginMessage: msg }, "*");
-              } else if (msg.type === "ping") {
-                sendToServer({ type: "pong" });
               }
-            } catch (err) {
-              log("Invalid message: " + err);
             }
-          };
+          } catch (err) {
+            log("Poll error: " + err);
+          }
+          isPolling = false;
+          pollTimer = setTimeout(poll, pollInterval);
         }
 
         window.onmessage = (event) => {
@@ -89,20 +55,19 @@
 
           if (msg.type === "config" && msg.serverUrl) {
             serverUrl = msg.serverUrl;
-            if (ws) {
-              ws.close();
-            } else {
-              connect();
-            }
+            if (pollTimer) clearTimeout(pollTimer);
+            poll();
             return;
           }
 
           if (msg.type === "response" || msg.type === "event") {
-            sendToServer(msg);
+            post(msg.type === "response" ? "/push" : "/event", msg).catch((err) => {
+              log("Post error: " + err);
+            });
           }
         };
 
-        connect();
+        poll();
       })();
     </script>
   </body>

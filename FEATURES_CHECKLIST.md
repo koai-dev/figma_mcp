@@ -21,9 +21,9 @@ Status mapping:
 - [x] scan_nodes_by_types
 
 ## Prototyping & Connections
-- [ ] get_reactions
-- [ ] set_default_connector
-- [ ] create_connections
+- [x] get_reactions
+- [x] set_default_connector
+- [x] create_connections
 
 ## Creating Elements
 - [x] create_rectangle
@@ -36,41 +36,50 @@ Status mapping:
 - [x] set_multiple_text_contents
 
 ## Auto Layout & Spacing
-- [ ] set_layout_mode
-- [ ] set_padding
-- [ ] set_axis_align
-- [ ] set_layout_sizing
-- [ ] set_item_spacing
+- [x] set_layout_mode
+- [x] set_padding
+- [x] set_axis_align
+- [x] set_layout_sizing
+- [x] set_item_spacing
 
 ## Styling
-- [ ] set_fill_color (partial: `update_style` can set fills)
-- [ ] set_stroke_color (partial: `update_style` can set strokes)
-- [ ] set_corner_radius (partial: `update_style` can set cornerRadius)
+- [x] set_fill_color
+- [x] set_stroke_color
+- [x] set_corner_radius
 
 ## Layout & Organization
-- [ ] move_node
-- [ ] resize_node
-- [ ] delete_node
-- [ ] delete_multiple_nodes
-- [ ] clone_node
+- [x] move_node
+- [x] resize_node
+- [x] delete_node
+- [x] delete_multiple_nodes
+- [x] clone_node
 
 ## Components & Styles
-- [ ] get_styles
-- [ ] get_local_components
-- [ ] create_component_instance
-- [ ] get_instance_overrides
-- [ ] set_instance_overrides
+- [x] get_styles
+- [x] get_local_components
+- [x] create_component_instance
+- [x] get_instance_overrides
+- [x] set_instance_overrides
 
 ## Export & Advanced
-- [ ] export_node_as_image (partial: `export_png`, `export_svg`, `export_pdf` only)
+- [x] export_node_as_image
 
 ## Connection Management
-- [ ] join_channel
+- [x] join_channel
+- [x] leave_channel
+- [x] list_channels
 
 ## MCP Prompts
-- [ ] design_strategy
-- [ ] read_design_strategy
-- [ ] text_replacement_strategy
-- [ ] annotation_conversion_strategy
-- [ ] swap_overrides_instances
-- [ ] reaction_to_connector_strategy
+- [x] design_strategy
+- [x] read_design_strategy
+- [x] text_replacement_strategy
+- [x] annotation_conversion_strategy
+- [x] swap_overrides_instances
+- [x] reaction_to_connector_strategy
+
+## Enhancements
+- [x] query_nodes
+- [x] snapshot_nodes
+- [x] diff_snapshots
+- [x] export_image_to_file
+- [x] batch_calls
