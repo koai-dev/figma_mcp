@@ -1,0 +1,109 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Figma MCP Bridge</title>
+    <style>
+      html, body { width: 100%; height: 100%; margin: 0; padding: 0; }
+    </style>
+  </head>
+  <body>
+    <script>
+      (function () {
+        let serverUrl = "ws://localhost:8765";
+        let ws = null;
+        let queue = [];
+        let reconnectDelay = 1000;
+        let reconnectTimer = null;
+
+        function log(message) {
+          // Visible only in Figma plugin console
+          console.log("[figma-mcp]", message);
+        }
+
+        function sendToServer(message) {
+          if (ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify(message));
+          } else {
+            queue.push(message);
+          }
+        }
+
+        function flushQueue() {
+          if (!ws || ws.readyState !== WebSocket.OPEN) return;
+          const pending = queue;
+          queue = [];
+          pending.forEach((msg) => ws.send(JSON.stringify(msg)));
+        }
+
+        function scheduleReconnect() {
+          if (reconnectTimer) return;
+          reconnectTimer = setTimeout(() => {
+            reconnectTimer = null;
+            connect();
+          }, reconnectDelay);
+        }
+
+        function connect() {
+          try {
+            ws = new WebSocket(serverUrl);
+          } catch (err) {
+            log("WebSocket error: " + err);
+            scheduleReconnect();
+            return;
+          }
+
+          ws.onopen = () => {
+            log("Connected to " + serverUrl);
+            sendToServer({ type: "hello", plugin: "figma-mcp-bridge", version: "0.1.0" });
+            flushQueue();
+          };
+
+          ws.onclose = () => {
+            log("Disconnected. Reconnecting...");
+            scheduleReconnect();
+          };
+
+          ws.onerror = (event) => {
+            log("WebSocket error");
+          };
+
+          ws.onmessage = (event) => {
+            try {
+              const msg = JSON.parse(event.data);
+              if (!msg || !msg.type) return;
+              if (msg.type === "request") {
+                parent.postMessage({ pluginMessage: msg }, "*");
+              } else if (msg.type === "ping") {
+                sendToServer({ type: "pong" });
+              }
+            } catch (err) {
+              log("Invalid message: " + err);
+            }
+          };
+        }
+
+        window.onmessage = (event) => {
+          const msg = event.data.pluginMessage;
+          if (!msg) return;
+
+          if (msg.type === "config" && msg.serverUrl) {
+            serverUrl = msg.serverUrl;
+            if (ws) {
+              ws.close();
+            } else {
+              connect();
+            }
+            return;
+          }
+
+          if (msg.type === "response" || msg.type === "event") {
+            sendToServer(msg);
+          }
+        };
+
+        connect();
+      })();
+    </script>
+  </body>
+</html>

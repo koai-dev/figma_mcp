@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "figma": {
+      "command": "node",
+      "args": ["/ABS/PATH/figma_mcp/server/dist/index.js"],
+      "env": {
+        "FIGMA_MCP_PORT": "8765",
+        "FIGMA_MCP_TIMEOUT_MS": "15000",
+        "FIGMA_MCP_MAX_EVENTS": "200"
+      }
+    }
+  }
+}
