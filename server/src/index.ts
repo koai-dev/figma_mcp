@@ -2,8 +2,10 @@ import { WebSocketServer, WebSocket } from "ws";
 import { promises as fs } from "fs";
 import path from "path";
 import http from "http";
+import { randomUUID } from "crypto";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import {
   CallToolRequestSchema,
   GetPromptRequestSchema,
@@ -15,6 +17,10 @@ import {
 const PORT = Number(process.env.FIGMA_MCP_PORT || 8765);
 const REQUEST_TIMEOUT_MS = Number(process.env.FIGMA_MCP_TIMEOUT_MS || 15000);
 const MAX_EVENTS = Number(process.env.FIGMA_MCP_MAX_EVENTS || 200);
+const MCP_PATH = process.env.FIGMA_MCP_MCP_PATH || "/mcp";
+const TRANSPORT_MODE = (process.env.FIGMA_MCP_TRANSPORT || "both").toLowerCase();
+const ENABLE_STDIO = TRANSPORT_MODE === "stdio" || TRANSPORT_MODE === "both";
+const ENABLE_MCP_HTTP = TRANSPORT_MODE === "http" || TRANSPORT_MODE === "both";
 
 let activeSocket: WebSocket | null = null;
 let socketId = 0;
@@ -33,6 +39,14 @@ const requestQueue: Array<QueuedRequest> = [];
 const pending = new Map<
   string,
   { resolve: (value: unknown) => void; reject: (err: Error) => void; timer: NodeJS.Timeout }
+>();
+
+const mcpHttpSessions = new Map<
+  string,
+  {
+    transport: StreamableHTTPServerTransport;
+    server: Server;
+  }
 >();
 
 const eventBuffer: Array<{
@@ -81,6 +95,47 @@ function handleEventMessage(message: any, channelOverride?: string) {
   });
 }
 
+function getHeaderString(value: string | string[] | undefined): string | null {
+  if (typeof value === "string" && value.trim().length > 0) {
+    return value;
+  }
+  if (Array.isArray(value) && typeof value[0] === "string" && value[0].trim().length > 0) {
+    return value[0];
+  }
+  return null;
+}
+
+function isInitializeRequest(body: unknown): boolean {
+  return typeof body === "object" && body !== null && "method" in body && (body as any).method === "initialize";
+}
+
+function writeJsonRpcError(
+  res: http.ServerResponse,
+  statusCode: number,
+  code: number,
+  message: string
+) {
+  res.statusCode = statusCode;
+  res.setHeader("Content-Type", "application/json");
+  res.end(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      error: { code, message },
+      id: null
+    })
+  );
+}
+
+async function parseBody(req: http.IncomingMessage): Promise<unknown> {
+  const chunks: Buffer[] = [];
+  for await (const chunk of req) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+  }
+  const raw = Buffer.concat(chunks).toString("utf8").trim();
+  if (!raw) return {};
+  return JSON.parse(raw);
+}
+
 const httpServer = http.createServer(async (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
@@ -99,6 +154,76 @@ const httpServer = http.createServer(async (req, res) => {
   }
 
   const url = new URL(req.url, `http://localhost:${PORT}`);
+  if (ENABLE_MCP_HTTP && url.pathname === MCP_PATH) {
+    try {
+      if (req.method === "POST") {
+        const parsedBody = await parseBody(req);
+        const sessionId = getHeaderString(req.headers["mcp-session-id"]);
+
+        if (sessionId) {
+          const session = mcpHttpSessions.get(sessionId);
+          if (!session) {
+            writeJsonRpcError(res, 404, -32001, `Session not found: ${sessionId}`);
+            return;
+          }
+          await session.transport.handleRequest(req, res, parsedBody);
+          return;
+        }
+
+        if (!isInitializeRequest(parsedBody)) {
+          writeJsonRpcError(res, 400, -32000, "Bad Request: No valid session ID");
+          return;
+        }
+
+        const server = createMcpServer();
+        const transport = new StreamableHTTPServerTransport({
+          sessionIdGenerator: () => randomUUID(),
+          onsessioninitialized: (sid) => {
+            mcpHttpSessions.set(sid, { transport, server });
+          }
+        });
+
+        transport.onclose = () => {
+          const sid = transport.sessionId;
+          if (!sid) return;
+          const session = mcpHttpSessions.get(sid);
+          if (session) {
+            mcpHttpSessions.delete(sid);
+            void session.server.close();
+          }
+        };
+
+        await server.connect(transport);
+        await transport.handleRequest(req, res, parsedBody);
+        return;
+      }
+
+      if (req.method === "GET" || req.method === "DELETE") {
+        const sessionId = getHeaderString(req.headers["mcp-session-id"]);
+        if (!sessionId) {
+          writeJsonRpcError(res, 400, -32000, "Bad Request: Missing MCP session ID");
+          return;
+        }
+        const session = mcpHttpSessions.get(sessionId);
+        if (!session) {
+          writeJsonRpcError(res, 404, -32001, `Session not found: ${sessionId}`);
+          return;
+        }
+        await session.transport.handleRequest(req, res);
+        return;
+      }
+
+      writeJsonRpcError(res, 405, -32000, `Method ${req.method || "UNKNOWN"} not allowed`);
+      return;
+    } catch (error) {
+      console.error("Error handling MCP HTTP request:", error);
+      if (!res.headersSent) {
+        writeJsonRpcError(res, 500, -32603, "Internal server error");
+      }
+      return;
+    }
+  }
+
   if (req.method === "GET" && url.pathname === "/pull") {
     const next = requestQueue.shift();
     if (!next) {
@@ -1656,98 +1781,110 @@ const tools: Tool[] = [
   }
 ];
 
-const server = new Server(
-  { name: "figma-mcp", version: "0.1.0" },
-  { capabilities: { tools: {}, prompts: {} } }
-);
+function createMcpServer() {
+  const server = new Server(
+    { name: "figma-mcp", version: "0.1.0" },
+    { capabilities: { tools: {}, prompts: {} } }
+  );
 
-server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
-server.setRequestHandler(ListPromptsRequestSchema, async () => ({ prompts }));
-server.setRequestHandler(GetPromptRequestSchema, async (request) => {
-  const name = request.params.name;
-  const prompt = promptCatalog[name];
-  if (!prompt) {
-    throw new Error(`Unknown prompt: ${name}`);
-  }
-  return {
-    description: prompt.description,
-    messages: prompt.messages
-  };
-});
-
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const name = request.params.name;
-  const args = (request.params.arguments || {}) as Record<string, unknown>;
-
-  try {
-    if (name === "get_events") {
-      return toTextResult(getEvents(args));
+  server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools }));
+  server.setRequestHandler(ListPromptsRequestSchema, async () => ({ prompts }));
+  server.setRequestHandler(GetPromptRequestSchema, async (request) => {
+    const name = request.params.name;
+    const prompt = promptCatalog[name];
+    if (!prompt) {
+      throw new Error(`Unknown prompt: ${name}`);
     }
-    if (name === "diff_snapshots") {
-      return toTextResult(diffSnapshots(args));
-    }
-    if (name === "export_image_to_file") {
-      return toTextResult(await exportImageToFile(args));
-    }
-    if (name === "batch_calls") {
-      return toTextResult(await runBatchCalls(args));
-    }
-    if (name === "clear_events") {
-      return toTextResult(clearEvents(args));
-    }
-    if (name === "join_channel") {
-      const channel = typeof args.channel === "string" && args.channel.trim().length > 0 ? args.channel : null;
-      if (!channel) {
-        return {
-          isError: true,
-          content: [
-            {
-              type: "text",
-              text: "channel must be a non-empty string"
-            }
-          ]
-        };
-      }
-      return toTextResult(joinChannel(channel));
-    }
-    if (name === "leave_channel") {
-      const channel = typeof args.channel === "string" && args.channel.trim().length > 0 ? args.channel : null;
-      if (!channel) {
-        return {
-          isError: true,
-          content: [
-            {
-              type: "text",
-              text: "channel must be a non-empty string"
-            }
-          ]
-        };
-      }
-      const clear = args.clear === true;
-      return toTextResult(leaveChannel(channel, clear));
-    }
-    if (name === "list_channels") {
-      return toTextResult(listChannels());
-    }
-
-    const result = await sendToPlugin(name, args);
-    return toTextResult(result);
-  } catch (err) {
     return {
-      isError: true,
-      content: [
-        {
-          type: "text",
-          text: err instanceof Error ? err.message : String(err)
-        }
-      ]
+      description: prompt.description,
+      messages: prompt.messages
     };
-  }
-});
+  });
 
-const transport = new StdioServerTransport();
-await server.connect(transport);
+  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const name = request.params.name;
+    const args = (request.params.arguments || {}) as Record<string, unknown>;
+
+    try {
+      if (name === "get_events") {
+        return toTextResult(getEvents(args));
+      }
+      if (name === "diff_snapshots") {
+        return toTextResult(diffSnapshots(args));
+      }
+      if (name === "export_image_to_file") {
+        return toTextResult(await exportImageToFile(args));
+      }
+      if (name === "batch_calls") {
+        return toTextResult(await runBatchCalls(args));
+      }
+      if (name === "clear_events") {
+        return toTextResult(clearEvents(args));
+      }
+      if (name === "join_channel") {
+        const channel = typeof args.channel === "string" && args.channel.trim().length > 0 ? args.channel : null;
+        if (!channel) {
+          return {
+            isError: true,
+            content: [
+              {
+                type: "text",
+                text: "channel must be a non-empty string"
+              }
+            ]
+          };
+        }
+        return toTextResult(joinChannel(channel));
+      }
+      if (name === "leave_channel") {
+        const channel = typeof args.channel === "string" && args.channel.trim().length > 0 ? args.channel : null;
+        if (!channel) {
+          return {
+            isError: true,
+            content: [
+              {
+                type: "text",
+                text: "channel must be a non-empty string"
+              }
+            ]
+          };
+        }
+        const clear = args.clear === true;
+        return toTextResult(leaveChannel(channel, clear));
+      }
+      if (name === "list_channels") {
+        return toTextResult(listChannels());
+      }
+
+      const result = await sendToPlugin(name, args);
+      return toTextResult(result);
+    } catch (err) {
+      return {
+        isError: true,
+        content: [
+          {
+            type: "text",
+            text: err instanceof Error ? err.message : String(err)
+          }
+        ]
+      };
+    }
+  });
+
+  return server;
+}
+
+if (ENABLE_STDIO) {
+  const stdioServer = createMcpServer();
+  const transport = new StdioServerTransport();
+  await stdioServer.connect(transport);
+}
 
 httpServer.listen(PORT, () => {
-  console.error(`figma-mcp server listening on http://localhost:${PORT}`);
+  const transports: string[] = [];
+  if (ENABLE_STDIO) transports.push("stdio");
+  if (ENABLE_MCP_HTTP) transports.push(`streamable-http@${MCP_PATH}`);
+  console.error(
+    `figma-mcp server listening on http://localhost:${PORT} (mode=${TRANSPORT_MODE}, transports=${transports.join(",")})`
+  );
 });
